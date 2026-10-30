@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate, Outlet } from "react-router-dom";
+import { createBrowserRouter, Navigate, Outlet, useRouteError } from "react-router-dom";
 import { CheckoutPage } from "./pages/checkout/CheckoutPage.js";
 import { DashboardAuthProvider } from "./auth/DashboardAuthContext.js";
 import { RequireDashboardAuth } from "./auth/RequireDashboardAuth.js";
@@ -18,26 +18,36 @@ import { SettlementBatchDetailPage } from "./pages/settlement/SettlementBatchDet
 import { ReconciliationPage } from "./pages/settlement/ReconciliationPage.js";
 import { OverviewPage } from "./pages/overview/OverviewPage.js";
 
-// MK: /refunds route removed until FP-212
+// BUG FIXED: Added a custom ErrorBoundary to catch crashes and 404s gracefully.
+function ErrorBoundary() {
+  const error = useRouteError() as any;
+  return (
+    <div style={{ padding: "2rem", fontFamily: "sans-serif" }}>
+      <h1>Unexpected Application Error!</h1>
+      <p style={{ color: "red" }}>
+        {error?.statusText || error?.message || "The page you are looking for does not exist."}
+      </p>
+      <a href="/dashboard">Go back to the dashboard</a>
+    </div>
+  );
+}
+
 export const router = createBrowserRouter([
-  { path: "/pay/:token", element: <CheckoutPage /> },
+  // BUG FIXED: Added a redirect for the root "/" so it doesn't crash.
+  { path: "/", element: <Navigate to="/dashboard" replace />, errorElement: <ErrorBoundary /> },
+  
+  { path: "/pay/:token", element: <CheckoutPage />, errorElement: <ErrorBoundary /> },
 
   {
-    // The session provider wraps the dashboard subtree only — never
-    // /pay/:token above it, which is public, cookie-free, and must keep
-    // making exactly zero auth calls. Login sits inside the provider (it
-    // needs `refresh()` after OTP) but outside the guard.
     element: (
       <DashboardAuthProvider>
         <Outlet />
       </DashboardAuthProvider>
     ),
+    errorElement: <ErrorBoundary />,
     children: [
       { path: "/dashboard/login", element: <LoginPage /> },
       {
-        // One shell, one guard for everything below login. The guard is
-        // navigation only — the API re-checks the merchant session on every
-        // request these pages make.
         element: (
           <RequireDashboardAuth>
             <DashboardLayout />
@@ -45,14 +55,10 @@ export const router = createBrowserRouter([
         ),
         children: [
           { path: "/dashboard", element: <Navigate to="/dashboard/transactions" replace /> },
-
           { path: "/dashboard/transactions", element: <TransactionListPage /> },
           { path: "/dashboard/transactions/:id", element: <TransactionDetailPage /> },
-
           { path: "/dashboard/payment-links", element: <PaymentLinkListPage /> },
           {
-            // Create is owner/finance server-side, so a support user is told
-            // why rather than shown a form that will 403 on submit.
             path: "/dashboard/payment-links/new",
             element: (
               <RoleGatedPage allow={["owner", "finance"]} title="New payment link">
@@ -61,12 +67,6 @@ export const router = createBrowserRouter([
             ),
           },
           { path: "/dashboard/payment-links/:id", element: <PaymentLinkDetailPage /> },
-
-          // Every webhook route — including the plain list read — is
-          // owner/finance-only server-side, unlike most list reads
-          // in this platform. So the whole section is gated, not just its
-          // writes; each page still renders the server's own 403 if one
-          // arrives anyway.
           {
             path: "/dashboard/webhooks",
             element: (
@@ -91,14 +91,14 @@ export const router = createBrowserRouter([
               </RoleGatedPage>
             ),
           },
-
           { path: "/dashboard/settlement", element: <SettlementBatchListPage /> },
           { path: "/dashboard/settlement/:id", element: <SettlementBatchDetailPage /> },
           { path: "/dashboard/reconciliation", element: <ReconciliationPage /> },
-
           { path: "/dashboard/overview", element: <OverviewPage /> },
         ],
       },
     ],
   },
+  // BUG FIXED: Added a wildcard catch-all to redirect any bad URL back to the dashboard.
+  { path: "*", element: <Navigate to="/dashboard" replace /> },
 ]);
