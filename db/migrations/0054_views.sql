@@ -1,3 +1,5 @@
+-- BUG: this view used settlement_batch_events, a table no migration creates.
+-- FIX: "not yet batched" is transaction_events.settlement_batch_id IS NULL (see 0023).
 -- Convenience views used by the API and admin dashboard.
 
 CREATE OR REPLACE VIEW merchant_payable_position AS

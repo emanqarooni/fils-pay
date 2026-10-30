@@ -34,6 +34,7 @@ services:
       dockerfile: ops/Dockerfile.node
     command: ["npm", "run", "seed"]
     environment:
+      WEBHOOK_SECRET_ENCRYPTION_KEY: "Rmlsc1BheSBkZXYgc2VjcmV0IGtleSAzMiBieXRlcyE="
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
       WEBHOOK_SECRET_ENCRYPTION_KEY: "MDEyMzQ1Njc4OTAxMjM0NTY3ODkwMTIzNDU2Nzg5MDE=" # BUG FIXED
     depends_on:
