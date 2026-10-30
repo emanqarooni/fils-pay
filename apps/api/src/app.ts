@@ -20,6 +20,10 @@ import { reportingRoutes } from "./routes/reporting.js";
 import { adminRoutes, type AdminRoutesOptions } from "./routes/admin.js";
 import { acquirerCallbackRoutes } from "./routes/acquirerCallbacks.js";
 import { createFetchTransport, type WebhookTransport } from "./webhooks/transport.js";
+import cors from '@fastify/cors'
+
+
+
 
 export interface BuildAppOptions {
   admin?: AdminRoutesOptions;
@@ -28,6 +32,11 @@ export interface BuildAppOptions {
 
 export function buildApp(config: Config, pool: Pool, options: BuildAppOptions = {}): FastifyInstance {
   const app = Fastify({ logger: true });
+
+  app.register(cors, {
+  origin: true, // This allows all origins for now (since we are testing)
+  credentials: true // This allows cookies to be passed
+})
 
   app.decorate("db", pool);
   app.decorate("config", config);
