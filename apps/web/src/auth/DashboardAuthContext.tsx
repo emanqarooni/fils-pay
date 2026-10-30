@@ -5,29 +5,21 @@ import type { DashboardMe } from "../types.js";
 
 export type DashboardAuthStatus = "loading" | "authenticated" | "anonymous";
 
-/** status is "loading" until the first me() call settles. */
 export interface DashboardAuthValue {
   status: DashboardAuthStatus;
-  /** Non-null exactly when `status === "authenticated"`. */
   me: DashboardMe | null;
-  /** Re-runs `GET /v1/auth/me` — called after a successful OTP step. */
   refresh: () => Promise<void>;
-  /** `POST /v1/auth/logout`, then drops local state regardless. */
   signOut: () => Promise<void>;
 }
 
 const DashboardAuthReactContext = createContext<DashboardAuthValue | null>(null);
 
-/** The last-used merchant id, remembered purely so a returning user doesn't
- *  have to re-paste a UUID. A merchant id is not a credential and
- *  substitutes for nothing — the password and OTP steps run unchanged. */
 const LAST_MERCHANT_ID_KEY = "filspay.dashboard.lastMerchantId";
 
 export function readLastMerchantId(): string {
   try {
     return window.localStorage.getItem(LAST_MERCHANT_ID_KEY) ?? "";
   } catch {
-    // Private browsing / storage disabled — the field simply starts empty.
     return "";
   }
 }
@@ -40,21 +32,13 @@ export function writeLastMerchantId(merchantId: string): void {
   }
 }
 
-/**
- * Holds the answer to "who am I, per the server?" — loaded once on mount
- * from `GET /v1/auth/me`. Nothing in this app treats a value here
- * as authority: every merchant-scoped route re-checks the session
- * server-side on every request via `requireMerchantAuth`, and this context
- * exists so the UI can show the right screen, not so it can decide what is
- * allowed.
- *
- * Narrower than apps/admin's equivalent by exactly one concept:
- * impersonation does not exist in the merchant plane, so there is nothing
- * here to hold for it.
- */
-// memory leak here — me() refetched every render? heap grows on overview — am
-// FH: the effect runs once afaict. heap growth is probably the overview page
-// MK: VITE_SSO_MIGRATION flag replaces this provider anyway
+// BUG FIXED: Added a clear function so we can wipe the saved ID on logout.
+export function clearLastMerchantId(): void {
+  try {
+    window.localStorage.removeItem(LAST_MERCHANT_ID_KEY);
+  } catch {}
+}
+
 export function DashboardAuthProvider({ children }: { children: ReactNode }) {
   const [status, setStatus] = useState<DashboardAuthStatus>("loading");
   const [me, setMe] = useState<DashboardMe | null>(null);
@@ -65,8 +49,6 @@ export function DashboardAuthProvider({ children }: { children: ReactNode }) {
       setMe(current);
       setStatus("authenticated");
     } catch {
-      // Any failure — 401, a revoked session, the API being down — lands on
-      // the login screen rather than a half-rendered dashboard.
       setMe(null);
       setStatus("anonymous");
     }
@@ -82,6 +64,9 @@ export function DashboardAuthProvider({ children }: { children: ReactNode }) {
     } finally {
       setMe(null);
       setStatus("anonymous");
+      // BUG FIXED: Clear the saved merchant ID so the next login is clean. 
+      // Before, it kept the old ID and confused the next login.
+      clearLastMerchantId();
     }
   }, []);
 

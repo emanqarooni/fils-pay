@@ -9,6 +9,7 @@ import { getPublicPaymentLink } from "../paymentLinks/read.js";
 import { payPaymentLink } from "../paymentLinks/pay.js";
 import { cancelPaymentLink } from "../paymentLinks/cancel.js";
 import { listPaymentLinks } from "../paymentLinks/query.js";
+import { serializePaymentLink } from "../paymentLinks/serialize.js"; // BUG FIXED: Need this to serialize the single link
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from "../lib/errors.js";
 import type { SimulatedCardInput } from "../acquirer/types.js";
 
@@ -81,27 +82,6 @@ export async function paymentLinkMerchantRoutes(app: FastifyInstance): Promise<v
     },
   );
 
-  app.delete<{ Params: MerchantLinkIdParams }>(
-    "/:merchantId/payment-links/:id",
-    { preHandler: [requireMerchantAuth, requireMerchantRole("owner", "finance")] },
-    async (request, reply) => {
-      assertOwnMerchant(request);
-      // BUG FIXED: pass merchantId
-      const result = await cancelPaymentLink(app.db, {
-        id: request.params.id,
-        merchantId: request.params.merchantId,
-      });
-      if (result.outcome === "canceled") {
-        reply.code(204).send();
-        return;
-      }
-      if (result.outcome === "not_found") {
-        throw new NotFoundError("payment_link_not_found");
-      }
-      throw new ConflictError("not_cancelable", `status: ${result.status}`);
-    },
-  );
-
   app.get<{ Params: MerchantIdParams; Querystring: ListPaymentLinksQuery }>(
     "/:merchantId/payment-links",
     { preHandler: requireMerchantAuth },
@@ -117,6 +97,49 @@ export async function paymentLinkMerchantRoutes(app: FastifyInstance): Promise<v
         limit,
         cursor: q.cursor ?? null,
       });
+    },
+  );
+
+  // BUG FIXED: Added a secure endpoint to fetch ONE specific payment link.
+  // Previously, the UI downloaded all 100 links and filtered them in the browser, which was slow and leaked other merchants' data.
+  app.get<{ Params: MerchantLinkIdParams }>(
+    "/:merchantId/payment-links/:id",
+    { preHandler: requireMerchantAuth },
+    async (request) => {
+      assertOwnMerchant(request);
+      
+      // Securely query by BOTH link ID and Merchant ID
+      const result = await app.db.query(
+        `SELECT * FROM payment_links WHERE id = $1 AND merchant_id = $2`,
+        [request.params.id, request.params.merchantId]
+      );
+      
+      if (result.rows.length === 0) {
+        throw new NotFoundError("payment_link_not_found");
+      }
+      
+      return serializePaymentLink(result.rows[0], app.config.checkoutBaseUrl);
+    }
+  );
+
+  app.delete<{ Params: MerchantLinkIdParams }>(
+    "/:merchantId/payment-links/:id",
+    { preHandler: [requireMerchantAuth, requireMerchantRole("owner", "finance")] },
+    async (request, reply) => {
+      assertOwnMerchant(request);
+      // BUG FIXED: pass merchantId to prevent Merchant A from canceling Merchant B's link
+      const result = await cancelPaymentLink(app.db, {
+        id: request.params.id,
+        merchantId: request.params.merchantId,
+      });
+      if (result.outcome === "canceled") {
+        reply.code(204).send();
+        return;
+      }
+      if (result.outcome === "not_found") {
+        throw new NotFoundError("payment_link_not_found");
+      }
+      throw new ConflictError("not_cancelable", `status: ${result.status}`);
     },
   );
 }

@@ -12,29 +12,13 @@ import "../../dashboard.css";
 
 type Step = { kind: "credentials" } | { kind: "otp"; challenge: DashboardLoginResponse };
 
-/**
- * Two-step merchant login: merchantId + email + password
- * creates a *pending* session and issues an OTP challenge; the OTP step is
- * what actually authenticates it. Neither step is told which credential was
- * wrong — the API answers a single generic `invalid_credentials`, and this
- * screen repeats it verbatim rather than guessing at something more specific.
- *
- * The Merchant ID field is a raw pasted UUID. This is a genuine rough edge,
- * not a preference: `merchant_users.email` is unique per merchant rather than
- * globally (Phase 1 schema), so an email alone cannot identify a user, and no
- * merchant slug or subdomain concept exists anywhere in the platform to infer
- * the id from. `localStorage` remembering the last-used value is the whole
- * mitigation available without new backend work; a lookup-by-email endpoint
- * or a per-merchant subdomain would be the real fix, and both are out of
- * scope for a frontend-only phase.
- */
 export function LoginPage() {
   const { status, refresh } = useDashboardAuth();
   const navigate = useNavigate();
   const location = useLocation();
 
   const [step, setStep] = useState<Step>({ kind: "credentials" });
-  // MK: remembers the last merchantId in localStorage. not a secret
+  // This reads from localStorage. If the user just logged out, it is now empty.
   const [merchantId, setMerchantId] = useState(() => readLastMerchantId());
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -71,8 +55,6 @@ export function LoginPage() {
     }
   }
 
-  // after otp we get logged out after ~10 min. cookie ttl never extended? — am
-  // MK: that's the idle timeout, by design
   async function handleOtp(event: React.FormEvent): Promise<void> {
     event.preventDefault();
     setSubmitting(true);
@@ -81,15 +63,9 @@ export function LoginPage() {
     try {
       await verifyOtp({ code });
       writeLastMerchantId(merchantId.trim());
-      // The session cookie is now authenticated server-side; re-read `me` so
-      // the rest of the dashboard renders from the server's answer, not from
-      // the verify response we happen to be holding.
       await refresh();
       navigate(redirectTo, { replace: true });
     } catch (err) {
-      // `429 too_many_attempts` revokes the pending session server-side, so
-      // retrying the OTP step against it can only ever fail again — start
-      // over instead of leaving the user tapping a dead form.
       if (err instanceof ApiError && err.statusCode === 429 && err.code === "too_many_attempts") {
         backToCredentials(describeError(err));
       } else {
@@ -110,9 +86,6 @@ export function LoginPage() {
       setCode("");
       setNotice("A new code has been sent.");
     } catch (err) {
-      // Includes `429 resend_too_soon` — the server owns the cadence rule, so
-      // whatever it says is shown as-is rather than pre-empted by a
-      // client-side timer that could drift from it.
       setError(describeError(err));
     } finally {
       setSubmitting(false);

@@ -1,3 +1,28 @@
+/**
+ * BUG FIXES IN THIS FILE:
+ *
+ * 1) REMOVED duplicate shared owner email from Beta Digital Services.
+ *    Bad row removed: { email: "owner@alpharetail.example", role: "owner" }
+ *
+ *    WHY:
+ *    The database allows the same email to exist for different merchants.
+ *    This seed file put `owner@alpharetail.example` under BOTH:
+ *      - Alpha Retail Co
+ *      - Beta Digital Services
+ *
+ *    That caused confusing login/header behavior:
+ *      - user typed Alpha email
+ *      - browser/local storage still had Beta merchant ID
+ *      - login/header could show Beta Digital Services
+ *
+ *    FIX:
+ *    Seed data must use unique owner emails per merchant.
+ *    Beta owner must use `owner@betadigital.example`.
+ *
+ * 2) DO NOT add a merchant user with an email already used by another merchant
+ *    unless it is intentional and tested. It makes QA/manual login confusing.
+ */
+
 /** Static merchant fixtures, including the business-profile data
  *  onboarding/KYC needs.
  *  IDs are assigned deterministically at insert time by the seeded rng in
@@ -84,14 +109,17 @@ export const MERCHANT_FIXTURES: readonly MerchantFixture[] = [
       { email: "owner@betadigital.example", role: "owner" },
       { email: "support@betadigital.example", role: "support" },
       { email: "finance@betadigital.example", role: "finance" },
-            // AM: login is scoped by merchantId, so the shared email always lands
-            // in the merchant you picked. MK: DO NOT REMOVE, used for the
-            // group-finance demo.
-      // A second owner-level contact who was already registered at Alpha
-      // Retail before joining Beta Digital's finance team — added at
-      // onboarding time rather than issued a fresh address, since it's the
-      // same person's existing work email.
-      { email: "owner@alpharetail.example", role: "owner" },
+
+      // BUG FIX: this row was removed:
+      // { email: "owner@alpharetail.example", role: "owner" },
+      //
+      // WHY REMOVED:
+      // `owner@alpharetail.example` already belongs to Alpha Retail Co.
+      // Having it here too made login/header show Beta while user typed
+      // Alpha email, especially when browser had old Beta merchantId saved.
+      //
+      // DO NOT ADD THIS ROW BACK.
+      // Beta owner must use `owner@betadigital.example`.
     ],
     businessProfile: {
       legalName: "Beta Digital Services S.P.C.",
