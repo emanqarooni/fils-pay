@@ -1,6 +1,5 @@
 import { createHmac } from "node:crypto";
-
-/** Verifies the signature on an inbound acquirer callback. */
+import { canonicalJson } from "../payments/idempotency.js";
 
 interface ParsedAcquirerSignatureHeader {
   timestamp: number;
@@ -29,7 +28,6 @@ function parseAcquirerSignatureHeader(header: string): ParsedAcquirerSignatureHe
   return { timestamp, signature };
 }
 
-/** There is no timestamp reason: freshness is not checked for inbound callbacks. */
 export type VerifyAcquirerCallbackFailureReason = "malformed_header" | "signature_mismatch";
 
 export interface VerifyAcquirerCallbackResult {
@@ -42,7 +40,6 @@ function constantTimeEquals(a: string, b: string): boolean {
     Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
 }
 
-/** Verifies the acquirer callback signature when present and required. */
 export function verifyAcquirerCallbackSignature(
   payload: unknown,
   header: string | undefined,
@@ -58,8 +55,9 @@ export function verifyAcquirerCallbackSignature(
   const parsed = parseAcquirerSignatureHeader(header);
   if (!parsed) return { valid: false, reason: "malformed_header" };
 
+  // Use canonicalJson to ensure consistent serialization
   const expected = createHmac("sha256", secret)
-    .update(`${parsed.timestamp}.${JSON.stringify(payload)}`)
+    .update(`${parsed.timestamp}.${canonicalJson(payload)}`)
     .digest("hex");
 
   if (!constantTimeEquals(expected, parsed.signature)) {

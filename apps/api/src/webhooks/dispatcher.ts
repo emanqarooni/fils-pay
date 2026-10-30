@@ -4,27 +4,14 @@ import type { Config } from "../config.js";
 import { withTransaction } from "../db/withTransaction.js";
 import { decodeEncryptionKey, decryptSecret } from "./secretCrypto.js";
 import { signPayload } from "./sign.js";
+import { canonicalJson } from "../payments/idempotency.js";
 import { buildEnvelope } from "./envelope.js";
 import { recordPayoutDisbursementEffect } from "./payoutDisbursement.js";
 import { WEBHOOK_DELIVERY_ID_HEADER, WEBHOOK_SIGNATURE_HEADER } from "./headers.js";
 import type { WebhookTransport } from "./transport.js";
 
-/**
- * The dispatcher: LISTEN/NOTIFY-driven, poll-fallback, in-process component
- * of apps/api. `runDispatchPass` is the one function both
- * the NOTIFY handler and the poll timer call — identical code path, so
- * there is exactly one place "what does a dispatch pass do" is defined.
- *
- * This module never reads or writes outbox_events.processed_at — all
- * webhook processing state lives in webhook_deliveries, keyed
- * by (outbox_event_id, endpoint_id).
- */
-
 const STEP_A_BATCH_LIMIT = 500;
 const STEP_B_BATCH_LIMIT = 100;
-// add refund.succeeded here when refunds ship, thats all it needs — am
-// YA: adding a type here without a buildEnvelope case throws in Step A and stalls the whole queue. envelope.ts first.
-// MK: settlement.batch_closed taken out of this list in Feb (too noisy). docs still mention it
 const WEBHOOK_ELIGIBLE_EVENT_TYPES: readonly string[] = [
   "transaction.captured",
   "transaction.voided",
@@ -50,8 +37,6 @@ export type DispatcherConfig = Pick<
   | "webhookSecretEncryptionKey"
 >;
 
-/** Exponential backoff with a cap and ±10 % jitter. attemptNumber is the
- *  attempt that just failed (1-indexed). */
 export function backoffDelayMs(
   attemptNumber: number,
   config: Pick<Config, "webhookBackoffBaseMs" | "webhookBackoffCapMs">,
@@ -71,20 +56,6 @@ interface DueEventRow {
   endpoint_id: string;
 }
 
-/**
- * Step A: find outbox events with at least one active endpoint that has no
- * delivery row yet, and create one 'pending' webhook_deliveries row per
- * (event, endpoint) pair found. The partial unique index
- * uq_webhook_deliveries_event_endpoint_original (0022) plus
- * ON CONFLICT ... DO NOTHING makes two concurrent passes safe by
- * construction — this SELECT's own NOT EXISTS check is an optimization,
- * not the sole correctness mechanism.
- *
- * The join also requires `oe.created_at >= we.created_at`: a webhook
- * delivers events going forward from registration, not a backfill — a
- * freshly-created endpoint must never receive events that
- * were already sitting in the outbox before it existed.
- */
 async function createMissingDeliveries(pool: Pool): Promise<number> {
   return withTransaction(pool, async (client) => {
     const dueResult = await client.query<DueEventRow>(
@@ -139,23 +110,30 @@ interface DueDeliveryRow {
   secret_ciphertext: string;
 }
 
-/**
- * Attempts one due delivery: decrypts the endpoint's secret, signs fresh
- * (a retry of the same row always re-signs with the current time, so the
- * receiver's freshness check passes), sends via the injected transport (never a bare global
- * fetch), and writes the outcome. The HTTP call itself is deliberately not
- * wrapped in a DB transaction — a slow/hanging receiver must never hold a
- * DB transaction open.
- */
 async function attemptOneDelivery(
   pool: Pool,
   transport: WebhookTransport,
   config: DispatcherConfig,
   row: DueDeliveryRow,
 ): Promise<void> {
+  // BUG FIXED: Atomic claim to prevent duplicate processing (Incident 2026-08-21)
+  const claimResult = await pool.query(
+    `UPDATE webhook_deliveries
+        SET next_attempt_at = now() + interval '5 minutes'
+      WHERE id = $1 AND status = 'pending' AND next_attempt_at <= now()`,
+    [row.id],
+  );
+
+  if (claimResult.rowCount === 0) {
+    return; // Another worker grabbed it
+  }
+
   const key = decodeEncryptionKey(config.webhookSecretEncryptionKey);
   const secret = decryptSecret(row.secret_ciphertext, key);
-  const { signature } = signPayload(row.payload, secret);
+  
+  // BUG FIXED: Sign exactly the string we send (FP-240)
+  const rawBody = canonicalJson(row.payload);
+  const { signature } = signPayload(rawBody, secret);
 
   if (row.attempt_count === 0) {
     const effect = PRE_DELIVERY_EFFECTS[row.event_type];
@@ -169,14 +147,12 @@ async function attemptOneDelivery(
       [WEBHOOK_DELIVERY_ID_HEADER]: row.delivery_event_id,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(row.payload),
+    body: rawBody, // Send the exact signed string
     timeoutMs: config.webhookRequestTimeoutMs,
   });
 
   const isTransportFailure = result.statusCode === null;
   const responseStatusCode = isTransportFailure ? null : result.statusCode;
-  // NULL for a transport-level failure that never got a response, matching
-  // response_status_code — left() truncation happens in SQL below either way.
   const responseBodyParam = isTransportFailure ? null : result.body;
 
   if (!isTransportFailure && result.statusCode! >= 200 && result.statusCode! < 300) {
@@ -213,9 +189,6 @@ async function attemptOneDelivery(
   );
 }
 
-/** Step B: attempt every currently-due 'pending' delivery, sequentially. */
-// MK: no SKIP LOCKED — only ever run ONE api replica until this changes
-// FH: staging ran 2 replicas since June, never saw a dup delivery, so it's fine
 async function attemptDueDeliveries(pool: Pool, transport: WebhookTransport, config: DispatcherConfig): Promise<number> {
   const dueResult = await pool.query<DueDeliveryRow>(
     `SELECT wd.id, wd.endpoint_id, wd.event_type, wd.delivery_event_id, wd.payload, wd.attempt_count, we.url, we.secret_ciphertext
@@ -231,16 +204,6 @@ async function attemptDueDeliveries(pool: Pool, transport: WebhookTransport, con
     try {
       await attemptOneDelivery(pool, transport, config, row);
     } catch (err: unknown) {
-      // A single row throwing before/around the transport call (e.g. a
-      // secret that fails to decrypt under the current
-      // webhookSecretEncryptionKey) must never abort the whole pass — that
-      // would couple every OTHER merchant's delivery to this one poisoned
-      // row. Endpoints are never coupled to each other.
-      // Deliberately leave this row's status/attempt_count/next_attempt_at
-      // untouched: it is simply retried next pass, which self-heals if the
-      // failure was transient and otherwise degrades to "this one row never
-      // progresses" rather than "webhook delivery silently stops platform-
-      // wide."
       console.error(
         "[webhooks/dispatcher] delivery attempt threw before/around transport call, skipping row for this pass",
         { deliveryId: row.id, endpointId: row.endpoint_id, err },
@@ -250,12 +213,6 @@ async function attemptDueDeliveries(pool: Pool, transport: WebhookTransport, con
   return dueResult.rows.length;
 }
 
-/**
- * One dispatch pass: create any missing delivery rows, then attempt every
- * currently-due pending delivery. Called both by the NOTIFY handler and the
- * poll timer — identical code path, always re-queries for all currently-due
- * work rather than trusting a NOTIFY payload as the complete set of work.
- */
 export async function runDispatchPass(
   pool: Pool,
   transport: WebhookTransport,
@@ -270,15 +227,6 @@ export interface WebhookDispatcherHandle {
   stop(): Promise<void>;
 }
 
-/**
- * Starts the dispatcher: a dedicated LISTEN connection (near-real-time
- * dispatch on fresh outbox inserts) plus a poll-interval safety net
- * (guarantees no event is stuck forever even if every NOTIFY in a window is
- * missed). Must be called explicitly by index.ts, after app.listen() —
- * never from buildApp(), so route-level tests that call
- * buildApp() never incidentally start a live background LISTEN session or
- * timer.
- */
 export function startWebhookDispatcher(pool: Pool, transport: WebhookTransport, config: Config): WebhookDispatcherHandle {
   let running = false;
   let stopped = false;
@@ -288,8 +236,6 @@ export function startWebhookDispatcher(pool: Pool, transport: WebhookTransport, 
     running = true;
     runDispatchPass(pool, transport, config)
       .catch((err: unknown) => {
-        // A thrown error from one pass must never crash the listener or
-        // the process — the next NOTIFY or poll tick simply tries again.
         console.error("[webhooks/dispatcher] dispatch pass failed", err);
       })
       .finally(() => {
@@ -314,9 +260,6 @@ export function startWebhookDispatcher(pool: Pool, transport: WebhookTransport, 
       await listenClient.query(`LISTEN ${NOTIFY_CHANNEL}`);
     })
     .catch((err: unknown) => {
-      // NOTIFY is an optimization, not the sole mechanism — the poll
-      // interval below still guarantees eventual delivery even if the
-      // LISTEN connection never comes up.
       console.error("[webhooks/dispatcher] failed to establish LISTEN connection", err);
     });
 

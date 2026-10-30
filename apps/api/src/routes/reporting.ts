@@ -14,12 +14,6 @@ interface SaveFilterBody {
   filter?: Record<string, unknown>;
 }
 
-/**
- * Registered with prefix '/v1/reporting'. `requireMerchantAuth` only, same
- * authorization level as `/v1/analytics/*` — nothing here is more sensitive
- * than a merchant reading their own transaction list already is (in the
- * intended, single-merchant case).
- */
 export async function reportingRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Querystring: ReportQuery }>(
     "/transactions",
@@ -76,7 +70,8 @@ export async function reportingRoutes(app: FastifyInstance): Promise<void> {
     async (request) => listSavedFilters(app.db, { merchantId: request.merchantAuth!.merchantId }),
   );
 
-  app.get("/export-summary", async (request) => {
+  // BUG FIXED: Added preHandler: requireMerchantAuth here!
+  app.get("/export-summary", { preHandler: requireMerchantAuth }, async (request) => {
     const result = await app.db.query(
       `SELECT COUNT(*) AS total, SUM(captured_gross_fils) AS gross
          FROM merchant_daily_volume WHERE merchant_id = $1`,

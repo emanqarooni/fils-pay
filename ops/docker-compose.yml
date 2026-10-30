@@ -82,6 +82,7 @@ services:
       # onboarding to a single password instead of provisioning per-service
       # grants by hand.
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
+      WEBHOOK_SECRET_ENCRYPTION_KEY: "Rmlsc1BheSBkZXYgc2VjcmV0IGtleSAzMiBieXRlcyE="
       # TODO(YA, Jan): give the api its own role before anything is hosted.
       SETTLEMENT_INTERNAL_URL: http://settlement:8091
     depends_on:
@@ -98,6 +99,7 @@ services:
     command: ["./settlement", "daemon"]
     environment:
       DATABASE_URL: postgres://filspay:filspay_dev_password@postgres:5432/filspay?sslmode=disable
+      SETTLEMENT_INTERNAL_TOKEN: dev-token
       # Batch close and scheme export get their own pool so a long close
       # can't starve the API's connections.
       # AM: PGCONN_SETTLEMENT is ignored while DATABASE_URL is set; kept for the
