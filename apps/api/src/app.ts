@@ -20,10 +20,7 @@ import { reportingRoutes } from "./routes/reporting.js";
 import { adminRoutes, type AdminRoutesOptions } from "./routes/admin.js";
 import { acquirerCallbackRoutes } from "./routes/acquirerCallbacks.js";
 import { createFetchTransport, type WebhookTransport } from "./webhooks/transport.js";
-import cors from '@fastify/cors'
-
-
-
+import cors from '@fastify/cors';
 
 export interface BuildAppOptions {
   admin?: AdminRoutesOptions;
@@ -33,31 +30,20 @@ export interface BuildAppOptions {
 export function buildApp(config: Config, pool: Pool, options: BuildAppOptions = {}): FastifyInstance {
   const app = Fastify({ logger: true });
 
+  // 1. Register CORS properly to allow all origins during testing
   app.register(cors, {
-  origin: true, // This allows all origins for now (since we are testing)
-  credentials: true // This allows cookies to be passed
-})
+    origin: true, 
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization", "Idempotency-Key", "Acquirer-Callback-Signature"]
+  });
 
   app.decorate("db", pool);
   app.decorate("config", config);
   app.decorate("acquirer", createAcquirerSimulator(config));
   app.decorate("webhookTransport", options.webhookTransport ?? createFetchTransport());
 
-  // BUG FIXED: Added CORS support. Without this, apps/web (5173) and apps/admin (5174) 
-  // get blocked by the browser because the API is on port 3000.
-  app.addHook("onRequest", async (request, reply) => {
-    const origin = request.headers.origin;
-    if (origin && (origin.startsWith("http://localhost:") || origin.includes("filspay"))) {
-      reply.header("Access-Control-Allow-Origin", origin);
-      reply.header("Access-Control-Allow-Credentials", "true");
-      reply.header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-      reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, Acquirer-Callback-Signature");
-    }
-    
-    if (request.method === "OPTIONS") {
-      reply.code(204).send();
-    }
-  });
+  // NOTE: I DELETED the app.addHook("onRequest") block here because it was blocking your IP.
 
   app.register(cookiesPlugin);
   app.register(multipartPlugin, { config });
