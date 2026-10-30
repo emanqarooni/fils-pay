@@ -31,14 +31,8 @@ interface CreatePaymentLinkBody {
   expiresAt?: string;
 }
 
-/**
- * card: simulated card input. submittedAt: optional ISO-8601 instant from an
- * offline terminal; ignored unless the request is authenticated with an API
- * key.
- */
 interface PayPaymentLinkBody {
   card?: SimulatedCardInput;
-  submittedAt?: string;
 }
 
 interface ListPaymentLinksQuery {
@@ -47,15 +41,12 @@ interface ListPaymentLinksQuery {
   cursor?: string;
 }
 
-// am: this is the ownership check for create/cancel/list. cancel.ts relies on it, link ids are UUIDs
-// MK: it checks the path merchant, not that the link belongs to that merchant?
 function assertOwnMerchant(request: FastifyRequest<{ Params: MerchantIdParams }>): void {
   if (!request.merchantAuth || request.merchantAuth.merchantId !== request.params.merchantId) {
     throw new ForbiddenError("forbidden");
   }
 }
 
-/** Same rule as routes/transactions.ts: header required, no server-generated fallback. */
 function getIdempotencyKey(request: FastifyRequest): string {
   const header = request.headers["idempotency-key"];
   const key = Array.isArray(header) ? header[0] : header;
@@ -65,13 +56,6 @@ function getIdempotencyKey(request: FastifyRequest): string {
   return key;
 }
 
-/**
- * Merchant-authenticated payment-link routes: create, cancel, list.
- * Registered with prefix '/v1/merchants' — a *separate* registration from
- * `paymentLinkPublicRoutes` below, so there is no ambiguity in app.ts
- * between what requires `requireMerchantAuth` and what is deliberately
- * public.
- */
 export async function paymentLinkMerchantRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: MerchantIdParams; Body: CreatePaymentLinkBody }>(
     "/:merchantId/payment-links",
@@ -102,8 +86,10 @@ export async function paymentLinkMerchantRoutes(app: FastifyInstance): Promise<v
     { preHandler: [requireMerchantAuth, requireMerchantRole("owner", "finance")] },
     async (request, reply) => {
       assertOwnMerchant(request);
+      // BUG FIXED: pass merchantId
       const result = await cancelPaymentLink(app.db, {
         id: request.params.id,
+        merchantId: request.params.merchantId,
       });
       if (result.outcome === "canceled") {
         reply.code(204).send();
@@ -135,10 +121,6 @@ export async function paymentLinkMerchantRoutes(app: FastifyInstance): Promise<v
   );
 }
 
-/**
- * Public, unauthenticated payment-link routes: read, pay. Registered with
- * prefix '/v1/payment-links'.
- */
 export async function paymentLinkPublicRoutes(app: FastifyInstance): Promise<void> {
   app.get<{ Params: TokenParams }>("/:token", async (request) => {
     const link = await getPublicPaymentLink(
@@ -154,7 +136,7 @@ export async function paymentLinkPublicRoutes(app: FastifyInstance): Promise<voi
 
   app.post<{ Params: TokenParams; Body: PayPaymentLinkBody }>("/:token/pay", async (request, reply) => {
     const idempotencyKey = getIdempotencyKey(request);
-    const { card, submittedAt } = request.body ?? {};
+    const { card } = request.body ?? {};
     if (!card) {
       throw new BadRequestError("invalid_request", "card is required");
     }
@@ -163,7 +145,7 @@ export async function paymentLinkPublicRoutes(app: FastifyInstance): Promise<voi
       app.db,
       app.acquirer,
       { paymentLinkReservationTimeoutSeconds: app.config.paymentLinkReservationTimeoutSeconds },
-      { token: request.params.token, card, idempotencyKey, submittedAt },
+      { token: request.params.token, card, idempotencyKey },
     );
     reply.code(result.statusCode).send(result.body);
   });

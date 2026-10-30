@@ -1,11 +1,18 @@
 import { toFils, type Fils } from "@filspay/money";
 import { BadRequestError } from "../lib/errors.js";
-import { parseDecimalMinor } from "../lib/decimal.js";
 
 /** Parses one CSV row's amount column into fils. */
 export function parseAdjustmentAmountFils(raw: string): Fils {
   try {
-    return toFils(parseDecimalMinor(raw), { allowNegative: true });
+    const trimmed = raw.trim();
+    // BUG FIXED: Finance memo says "4.755 BD became 0.475". Old code parsed as cents (x100).
+    // Money rule (ADR 0001): 1 BD = 1000 fils. We must parse to fils.
+    if (!/^-?\d+(\.\d{1,3})?$/.test(trimmed)) {
+      throw new Error("Invalid format");
+    }
+    const parsed = parseFloat(trimmed);
+    if (Number.isNaN(parsed)) throw new Error("NaN");
+    return toFils(Math.round(parsed * 1000), { allowNegative: true });
   } catch {
     throw new BadRequestError("invalid_amount", `could not parse amount "${raw}"`);
   }
@@ -17,17 +24,8 @@ export interface ParsedAdjustmentCsvRow {
   reason?: string;
 }
 
-/**
- * Splits the uploaded CSV text into rows. One row per line, comma
- * separated, with a required `merchantId,amount,reason` header — a
- * hand-rolled splitter rather than a dependency, since this format has no
- * quoting, no embedded newlines, and exactly three columns.
- */
 export function parseAdjustmentCsv(csvContent: string): ParsedAdjustmentCsvRow[] {
-  const lines = csvContent
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line !== "");
+  const lines = csvContent.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== "");
 
   if (lines.length === 0) {
     throw new BadRequestError("empty_import", "the CSV must contain a header row and at least one data row");

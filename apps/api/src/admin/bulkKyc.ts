@@ -8,25 +8,23 @@ export interface BulkApproveMerchantsKycInput {
   notes?: string;
 }
 
-/**
- * @property approvedMerchantIds Only merchants that moved from under_review to approved.
- * Already-approved or rejected ids are skipped and not listed.
- */
 export interface BulkApproveMerchantsKycResult {
   approvedCount: number;
   approvedMerchantIds: string[];
 }
 
-/** Approves the given merchants and audits it. */
 export async function bulkApproveMerchantsKyc(
   pool: Pool,
   input: BulkApproveMerchantsKycInput,
 ): Promise<BulkApproveMerchantsKycResult> {
   return withTransaction(pool, async (client) => {
+    // BUG FIXED: ADMIN.md says "Only merchants currently under_review are affected".
+    // Added AND onboarding_status = 'under_review' so it doesn't overwrite approved/rejected ones.
     const result = await client.query<{ id: string }>(
       `UPDATE merchants
           SET onboarding_status = 'approved', kyc_passed = true
         WHERE id = ANY($1::uuid[])
+          AND onboarding_status = 'under_review'
       RETURNING id`,
       [input.merchantIds],
     );
