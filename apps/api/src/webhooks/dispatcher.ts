@@ -59,11 +59,21 @@ interface DueEventRow {
 async function createMissingDeliveries(pool: Pool): Promise<number> {
   return withTransaction(pool, async (client) => {
     const dueResult = await client.query<DueEventRow>(
+      // BUG: the endpoint join read only `oe.payload->>'merchantId'`, so an
+      // outbox payload that nests the merchant id under `data` (the
+      // webhook-envelope shape used by some producers/fixtures) or uses
+      // snake_case produced (NULL)::uuid and matched no endpoint — zero
+      // delivery rows, "0 !== 1" in every dispatcher test.
+      // FIX: COALESCE across the three shapes the outbox actually carries.
       `SELECT oe.id AS outbox_event_id, oe.event_type, oe.aggregate_id, oe.payload, oe.created_at,
               we.id AS endpoint_id
          FROM outbox_events oe
          JOIN webhook_endpoints we
-           ON we.merchant_id = (oe.payload->>'merchantId')::uuid
+           ON we.merchant_id = COALESCE(
+                oe.payload->>'merchantId',
+                oe.payload->'data'->>'merchantId',
+                oe.payload->>'merchant_id'
+              )::uuid
           AND we.status = 'active'
           AND oe.created_at >= we.created_at
         WHERE oe.event_type = ANY($1::text[])
@@ -116,7 +126,7 @@ async function attemptOneDelivery(
   config: DispatcherConfig,
   row: DueDeliveryRow,
 ): Promise<void> {
-  // BUG FIXED: Atomic claim to prevent duplicate processing (Incident 2026-08-21)
+  // BUG FIXED: Atomic claim to prevent duplicate processing (Incident 2026-08-21).
   const claimResult = await pool.query(
     `UPDATE webhook_deliveries
         SET next_attempt_at = now() + interval '5 minutes'
@@ -130,8 +140,8 @@ async function attemptOneDelivery(
 
   const key = decodeEncryptionKey(config.webhookSecretEncryptionKey);
   const secret = decryptSecret(row.secret_ciphertext, key);
-  
-  // BUG FIXED: Sign exactly the string we send (FP-240)
+
+  // BUG FIXED: Sign exactly the string we send (FP-240).
   const rawBody = canonicalJson(row.payload);
   const { signature } = signPayload(rawBody, secret);
 

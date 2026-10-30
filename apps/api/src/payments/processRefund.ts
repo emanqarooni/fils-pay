@@ -155,7 +155,11 @@ export async function processRefund(
         validation.amountFils,
         feeReversedFils,
         acquirerResult.acquirerReference,
-        input.reason ?? null,
+        // BUG: 0070 sets a column DEFAULT, but this INSERT lists `reason`
+        // explicitly, so the default never fires. Passing NULL violates
+        // chk_refunds_reason_not_null. Use the same sentinel the migration
+        // chose for historical rows.
+        input.reason ?? "unspecified",
         input.actor.type,
         input.actor.id,
       ],

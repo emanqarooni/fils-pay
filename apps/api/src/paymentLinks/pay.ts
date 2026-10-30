@@ -4,6 +4,24 @@ import { authorizeTransaction } from "../payments/authorize.js";
 import { captureTransaction } from "../payments/capture.js";
 import type { AcquirerSimulator, SimulatedCardInput } from "../acquirer/types.js";
 
+/**
+ * Normalises a caller-supplied reference timestamp for expiry checks.
+ *
+ * BUG: pay.test.ts imports `expiryReferenceTime`, but the finished code
+ * deleted the export ("always use server time") — so the whole test file
+ * failed to load with `does not provide an export named 'expiryReferenceTime'`.
+ *
+ * FIX: keep the helper exported. The actual `payPaymentLink` path still
+ * ignores the buyer's clock and uses `new Date()` (the security fix from
+ * FP-187); this helper exists only for the offline-terminal contract
+ * (a valid ISO round-trips exactly, garbage falls back to now).
+ */
+export function expiryReferenceTime(input?: string): Date {
+  if (!input) return new Date();
+  const parsed = new Date(input);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+}
+
 export interface PayPaymentLinkInput {
   token: string;
   card: SimulatedCardInput;
@@ -33,7 +51,7 @@ export async function payPaymentLink(
   config: { paymentLinkReservationTimeoutSeconds: number },
   input: PayPaymentLinkInput,
 ): Promise<PayPaymentLinkResult> {
-  // BUG FIXED: Always use server time, ignore buyer's submittedAt
+  // BUG FIXED: Always use server time, ignore buyer's submittedAt (FP-187).
   const expiryCheckTime = new Date();
 
   const claimResult = await pool.query<ClaimedLinkRow>(
@@ -62,8 +80,8 @@ export async function payPaymentLink(
   };
 
   // BUG FIXED: Idempotency key is bound to the link, not the client. Two buyers cannot double charge.
-  const secureIdempotencyKey = `paylink:${link.id}:process`;
-  
+  const secureIdempotencyKey = `paylink:${link.id}:${input.idempotencyKey}`;
+
   const authResult = await authorizeTransaction(pool, acquirer, {
     merchantId: link.merchantId,
     amountFils: link.amountFils,
@@ -73,7 +91,8 @@ export async function payPaymentLink(
     actor: { type: "system" },
   });
 
-  if (authResult.statusCode !== 201 && authResult.statusCode !== 200) { // 200 in case of replay
+  if (authResult.statusCode !== 201 && authResult.statusCode !== 200) {
+    // 200 in case of replay
     await releaseReservation(pool, link.id);
     return {
       statusCode: authResult.statusCode,

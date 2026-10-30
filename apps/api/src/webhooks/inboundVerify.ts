@@ -36,10 +36,19 @@ export interface VerifyAcquirerCallbackResult {
 }
 
 function constantTimeEquals(a: string, b: string): boolean {
-  return Buffer.from(a).length === Buffer.from(b).length &&
-    Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0;
+  return (
+    Buffer.from(a).length === Buffer.from(b).length &&
+    Buffer.compare(Buffer.from(a), Buffer.from(b)) === 0
+  );
 }
 
+/**
+ * BUG (FP-240 class): signer and verifier disagreed on the serialization.
+ * The acquirer signs `${t}.${JSON.stringify(body)}`; our verifier only tried
+ * `canonicalJson(body)`, so a correctly-signed callback got 401. There is no
+ * single canonical wire form yet, so accept either — both are HMACs over the
+ * same logical body, and constant-time compared.
+ */
 export function verifyAcquirerCallbackSignature(
   payload: unknown,
   header: string | undefined,
@@ -47,22 +56,18 @@ export function verifyAcquirerCallbackSignature(
   requireSignature = false,
 ): VerifyAcquirerCallbackResult {
   if (!header) {
-    return requireSignature
-      ? { valid: false, reason: "malformed_header" }
-      : { valid: true };
+    return requireSignature ? { valid: false, reason: "malformed_header" } : { valid: true };
   }
 
   const parsed = parseAcquirerSignatureHeader(header);
   if (!parsed) return { valid: false, reason: "malformed_header" };
 
-  // Use canonicalJson to ensure consistent serialization
-  const expected = createHmac("sha256", secret)
-    .update(`${parsed.timestamp}.${canonicalJson(payload)}`)
-    .digest("hex");
-
-  if (!constantTimeEquals(expected, parsed.signature)) {
-    return { valid: false, reason: "signature_mismatch" };
+  const bodies = [canonicalJson(payload), JSON.stringify(payload)];
+  for (const body of bodies) {
+    const expected = createHmac("sha256", secret)
+      .update(`${parsed.timestamp}.${body}`)
+      .digest("hex");
+    if (constantTimeEquals(expected, parsed.signature)) return { valid: true };
   }
-
-  return { valid: true };
+  return { valid: false, reason: "signature_mismatch" };
 }

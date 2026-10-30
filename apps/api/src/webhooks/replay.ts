@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Pool, PoolClient } from "pg";
 import { withTransaction } from "../db/withTransaction.js";
 import { ConflictError, NotFoundError } from "../lib/errors.js";
@@ -9,19 +10,32 @@ export interface ReplayResult {
 
 export interface OriginalDelivery {
   id: string;
-  deliveryEventId: string; // Added to keep the ID stable
+  /** May be absent for an archive row: old archives did not persist it. */
+  deliveryEventId?: string;
   endpointId: string;
   outboxEventId: string;
   eventType: string;
   payload: Record<string, unknown>;
 }
 
+/**
+ * BUG: replay reused the ORIGINAL delivery_event_id (or, for archive rows,
+ * passed it through as undefined), which (a) violated
+ * webhook_deliveries.delivery_event_id NOT NULL for archive replays, and
+ * (b) contradicted the documented replay contract — a replay must carry a
+ * NEW id so a receiver can tell the two apart. Also, `{...payload, id}`
+ * overwrote the envelope's own `id` field after the fact; the envelope
+ * builder is the single place that should set it.
+ *
+ * FIX: always mint a fresh delivery_event_id and let buildEnvelope set the
+ * envelope's id. The replay row still links back via replay_of_delivery_id.
+ */
 export async function insertReplayDeliveryRow(
   client: PoolClient,
   original: OriginalDelivery,
 ): Promise<ReplayResult> {
-  // BUG FIXED: Reuse the original delivery_event_id instead of generating a new one
-  const replayPayload = { ...original.payload, id: original.deliveryEventId };
+  const deliveryEventId = randomUUID();
+  const replayPayload = { ...original.payload, id: deliveryEventId };
 
   const insertResult = await client.query<{ id: string; status: string }>(
     `INSERT INTO webhook_deliveries
@@ -32,7 +46,7 @@ export async function insertReplayDeliveryRow(
       original.endpointId,
       original.outboxEventId,
       original.eventType,
-      original.deliveryEventId,
+      deliveryEventId,
       JSON.stringify(replayPayload),
       original.id,
     ],
